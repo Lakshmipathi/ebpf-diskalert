@@ -1,0 +1,5 @@
+devicename = "/dev/mapper/debian--vg-root"
+diskusage_threshold = 90
+action = "/usr/bin/date"
+repeat_action = 1
+
