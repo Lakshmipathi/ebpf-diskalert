@@ -38,7 +38,9 @@ In this demonstration, you'll observe that when the disk usage, as indicated by 
 https://github.com/Lakshmipathi/ebpf-diskalert/assets/624948/57c6924a-1117-4356-af26-d2b67cefc72e
 
 
-
+Installation
+------------
+Download the `ebpf-diskalert` binary from this repo and copy it under `/usr/sbin` Then set appropriate permission. `chmod 500 /usr/sbin/ebpf-diskalert` and run it.
 
 Reporting bugs:
 --------------
