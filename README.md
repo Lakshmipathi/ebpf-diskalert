@@ -22,6 +22,9 @@ repeat_action = 1
 
 Here's an explanation of the configuration options:
 
+
+
+
     - devicename: Specify the device to monitor (e.g., "/dev/sda1").
     - diskusage_threshold: Set the disk usage threshold at which the action should be triggered (e.g., 90%).
     - action: Specify the binary or script to execute when the threshold is breached (e.g., "notify.sh").
@@ -31,7 +34,8 @@ Here's an explanation of the configuration options:
 Demo
 ----
 
-TBD
+https://github.com/Lakshmipathi/ebpf-diskalert/assets/624948/ea0efa7c-bc40-4ad9-bea8-c55a828b1432
+
 
 
 Reporting bugs:
