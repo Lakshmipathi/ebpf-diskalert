@@ -33,6 +33,7 @@ Here's an explanation of the configuration options:
 
 Demo
 ----
+In this demonstration, you'll observe that when the disk usage, as indicated by `df -h`, surpasses the specified 20% threshold as defined in `/root/c.toml`, the system automatically runs `lvm_extend.sh` to expand the disk capacity. You can confirm this disk size expansion by monitoring the top-right `df -h /mnt` output as it increases when the usage crosses the 20% threshold.
 
 https://github.com/Lakshmipathi/ebpf-diskalert/assets/624948/57c6924a-1117-4356-af26-d2b67cefc72e
 
