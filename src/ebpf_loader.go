@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"log"
 	"os"
+	"sync"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
@@ -58,7 +59,7 @@ func ebpf_loader(ci *ConfigData, di *Devinfo) {
 	if err != nil {
 		logger.Fatalf("ebpf_loader: reader error")
 	}
-
+	var m sync.Mutex
 	for {
 		ev, err := rd.Read()
 		if err != nil {
@@ -79,6 +80,9 @@ func ebpf_loader(ci *ConfigData, di *Devinfo) {
 		}
 
 		logger.Printf("Command:%s User: %d  wrote to the mountpoint:%s\n", data.Command, data.Pid, di.MountPoint)
+
+		m.Lock()
 		checkDiskUSage(ci, di)
+		m.Unlock()
 	}
 }
