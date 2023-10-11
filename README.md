@@ -37,6 +37,10 @@ In this demonstration, you'll observe that when the disk usage, as indicated by 
 
 https://github.com/Lakshmipathi/ebpf-diskalert/assets/624948/57c6924a-1117-4356-af26-d2b67cefc72e
 
+Please take note of the following:
+The ext4 file system has a default configuration where `5%` of the blocks are reserved for the root user. These reserved blocks are counted as used when you check the file system using the `df` command. In other words, if `df` displays `100%` usage, only `95%` of the space is actually utilized, with the remaining `5%` reserved for the root user. It's important to mention that ebpf-diskalert considers the `5%` reserved block as available space.
+
+If you plan to trigger an action based on the output of the `df` command, you should set your threshold to be `5%` less than your desired usage percentage. For instance, if you want `ebpf-diskalert` to trigger action when df shows `70%` usage, set the `diskusage_threshold` to `65`. In the demonstration above, I removed any reserved blocks from the device using the following command: `tune2fs -m0 /dev/partition`.
 
 Installation
 ------------
