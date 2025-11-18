@@ -1,7 +1,12 @@
 # ebpf-diskalert
 
-As the name suggests, ebpf-diskalert is a tool designed for monitoring disk usage and triggering actions 
+As the name suggests, ebpf-diskalert is a tool designed for monitoring disk usage and triggering actions
 when specific thresholds are exceeded.
+
+## Documentation
+
+- **[Design Document](DESIGN.md)** - Comprehensive design documentation covering architecture, components, data flow, and design decisions
+- **[Architecture Diagrams](ARCHITECTURE.md)** - Detailed architecture diagrams showing system components and interactions
 
 Usage
 -----
