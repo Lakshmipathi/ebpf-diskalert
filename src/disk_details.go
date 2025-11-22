@@ -84,6 +84,11 @@ type ConfigData struct {
 	DiskUsageThreshold uint64
 	Action             string
 	RepeatAction       uint64
+	// File recovery configuration
+	RecoveryEnabled    bool
+	RecoveryMinSize    uint64
+	RecoveryDir        string
+	RecoveryMaxFiles   uint64
 }
 
 type Devinfo struct {
@@ -106,6 +111,19 @@ func getConfig(configFile string) ConfigData {
 	cf.DiskUsageThreshold = viper.GetUint64("diskusage_threshold")
 	cf.Action = viper.GetString("action")
 	cf.RepeatAction = viper.GetUint64("repeat_action")
+
+	// Read recovery configuration
+	cf.RecoveryEnabled = viper.GetBool("recovery_enabled")
+	cf.RecoveryMinSize = viper.GetUint64("recovery_min_size")
+	cf.RecoveryDir = viper.GetString("recovery_dir")
+	if cf.RecoveryDir == "" {
+		cf.RecoveryDir = "/var/lib/diskalert/recovered"
+	}
+	cf.RecoveryMaxFiles = viper.GetUint64("recovery_max_files")
+	if cf.RecoveryMaxFiles == 0 {
+		cf.RecoveryMaxFiles = 1000
+	}
+
 	return cf
 }
 

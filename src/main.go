@@ -27,6 +27,13 @@ func main() {
 					fmt.Println("Please provide a config file using '-c' flag.")
 				} else {
 					cf, di := handle_io()
+
+					// Start file recovery system if enabled
+					if cf.RecoveryEnabled {
+						go startRecoverySystem(&cf)
+					}
+
+					// Start disk usage monitoring (blocks here)
 					ebpf_loader(&cf, &di)
 				}
 			}

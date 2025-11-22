@@ -1,0 +1,28 @@
+# eBPF Disk Alert Configuration with File Recovery
+# =================================================
+
+# Disk monitoring configuration
+devicename = "/dev/mapper/debian--vg-root"
+diskusage_threshold = 90
+action = "/usr/bin/date"
+repeat_action = 1
+
+# File Recovery Configuration
+# ============================
+# Enable file recovery via open file descriptors
+recovery_enabled = true
+
+# Minimum file size to track (in bytes)
+# Files smaller than this will not be tracked for recovery
+# Default: 1024 bytes (1 KB)
+# Set to 0 to track all files
+recovery_min_size = 1024
+
+# Directory where recovered files will be stored
+# Default: /var/lib/diskalert/recovered
+recovery_dir = "/var/lib/diskalert/recovered"
+
+# Maximum number of recovered files to keep
+# Older files will be automatically cleaned up
+# Default: 1000
+recovery_max_files = 1000
