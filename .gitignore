@@ -1,0 +1,29 @@
+# Build artifacts
+ebpf-diskalert
+*.o
+go.sum
+
+# eBPF generated files
+src/*_bpfel.go
+src/*_bpfel.o
+src/gen*
+
+# Kernel headers
+src/bpf/vmlinux.h
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Recovery directory (runtime data)
+/var/lib/diskalert/
