@@ -11,6 +11,7 @@
 struct fd_key_t {
     u64 inode;      // Inode number
     u32 dev;        // Device ID
+    u32 padding;    // Explicit padding for 16-byte alignment
 };
 
 struct fd_info_t {
@@ -75,6 +76,18 @@ struct {
     __type(value, u64); // Config value
 } config_map SEC(".maps");
 
+// Temporary map to store pathname between sys_enter and sys_exit_openat
+struct openat_args_t {
+    char pathname[FNAME_LEN];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, u64);  // pid_tgid
+    __type(value, struct openat_args_t);
+} openat_args_map SEC(".maps");
+
 // Helper function to check if tracking is enabled
 static __always_inline int is_tracking_enabled() {
     u32 key = 0;  // 0 = enabled flag
@@ -95,28 +108,77 @@ static __always_inline u64 get_min_file_size() {
     return *min_size;
 }
 
-// Helper to read inode info from file structure
+// Helper to read inode info from file structure - FIXED for proper kernel memory access
 static __always_inline int get_file_inode_info(struct file *file,
                                                 u64 *inode_num,
                                                 u32 *dev,
                                                 u64 *size) {
     if (!file) {
+        bpf_printk("[recovery] get_file_inode_info: file is NULL\n");
         return -1;
     }
 
-    struct inode *inode = BPF_CORE_READ(file, f_inode);
-    if (!inode) {
+    // Read f_inode pointer
+    struct inode *inode;
+    int ret = bpf_probe_read_kernel(&inode, sizeof(inode), &file->f_inode);
+    if (ret != 0 || !inode) {
+        bpf_printk("[recovery] failed to read f_inode, ret=%d\n", ret);
         return -1;
     }
 
-    *inode_num = BPF_CORE_READ(inode, i_ino);
-
-    struct super_block *sb = BPF_CORE_READ(inode, i_sb);
-    if (!sb) {
+    // Read inode number
+    ret = bpf_probe_read_kernel(inode_num, sizeof(*inode_num), &inode->i_ino);
+    if (ret != 0) {
+        bpf_printk("[recovery] failed to read i_ino, ret=%d\n", ret);
         return -1;
     }
-    *dev = BPF_CORE_READ(sb, s_dev);
+
+    // Read superblock pointer
+    struct super_block *sb;
+    ret = bpf_probe_read_kernel(&sb, sizeof(sb), &inode->i_sb);
+    if (ret != 0 || !sb) {
+        bpf_printk("[recovery] failed to read i_sb, ret=%d\n", ret);
+        return -1;
+    }
+
+    // Read device ID
+    ret = bpf_probe_read_kernel(dev, sizeof(*dev), &sb->s_dev);
+    if (ret != 0) {
+        bpf_printk("[recovery] failed to read s_dev, ret=%d\n", ret);
+        return -1;
+    }
+
+    // Read file size using BPF_CORE_READ for proper access
     *size = BPF_CORE_READ(inode, i_size);
+
+    bpf_printk("[recovery] inode=%llu dev=%u size=%llu\n", *inode_num, *dev, *size);
+
+    return 0;
+}
+
+// Hook: Capture pathname on openat entry
+SEC("tracepoint/syscalls/sys_enter_openat")
+int trace_openat_enter(struct trace_event_raw_sys_enter *ctx)
+{
+    if (!is_tracking_enabled()) {
+        return 0;
+    }
+
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    // Get pathname from syscall args
+    // openat(dfd, pathname, flags, mode)
+    // args[1] is the pathname pointer
+    char *pathname_ptr = (char *)ctx->args[1];
+    if (!pathname_ptr) {
+        return 0;
+    }
+
+    struct openat_args_t args = {0};
+    bpf_probe_read_user_str(&args.pathname, sizeof(args.pathname), pathname_ptr);
+
+    // Store in temp map
+    bpf_map_update_elem(&openat_args_map, &pid_tgid, &args, BPF_ANY);
 
     return 0;
 }
@@ -137,7 +199,6 @@ int trace_openat_exit(struct trace_event_raw_sys_exit *ctx)
 
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 pid = pid_tgid >> 32;
-    u32 tid = (u32)pid_tgid;
 
     // Get current task
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
@@ -145,28 +206,31 @@ int trace_openat_exit(struct trace_event_raw_sys_exit *ctx)
         return 0;
     }
 
-    // Get files structure
-    struct files_struct *files = BPF_CORE_READ(task, files);
-    if (!files) {
+    // Read files structure pointer
+    struct files_struct *files;
+    int ret = bpf_probe_read_kernel(&files, sizeof(files), &task->files);
+    if (ret != 0 || !files) {
         return 0;
     }
 
-    // Get fdtable
-    struct fdtable *fdt = BPF_CORE_READ(files, fdt);
-    if (!fdt) {
+    // Read fdtable pointer
+    struct fdtable *fdt;
+    ret = bpf_probe_read_kernel(&fdt, sizeof(fdt), &files->fdt);
+    if (ret != 0 || !fdt) {
         return 0;
     }
 
-    // Get fd array
-    struct file **fd_array = BPF_CORE_READ(fdt, fd);
-    if (!fd_array) {
+    // Read fd array pointer
+    struct file **fd_array;
+    ret = bpf_probe_read_kernel(&fd_array, sizeof(fd_array), &fdt->fd);
+    if (ret != 0 || !fd_array) {
         return 0;
     }
 
-    // Get file structure for this fd
+    // Read file structure pointer for this fd
     struct file *file;
-    bpf_probe_read_kernel(&file, sizeof(file), &fd_array[fd]);
-    if (!file) {
+    ret = bpf_probe_read_kernel(&file, sizeof(file), &fd_array[fd]);
+    if (ret != 0 || !file) {
         return 0;
     }
 
@@ -181,6 +245,7 @@ int trace_openat_exit(struct trace_event_raw_sys_exit *ctx)
     // Check minimum file size filter
     u64 min_size = get_min_file_size();
     if (size < min_size) {
+        bpf_printk("[recovery] file too small (%llu < %llu), skipping\n", size, min_size);
         return 0;
     }
 
@@ -188,6 +253,7 @@ int trace_openat_exit(struct trace_event_raw_sys_exit *ctx)
     struct fd_key_t key = {
         .inode = inode_num,
         .dev = dev,
+        .padding = 0,
     };
 
     struct fd_info_t info = {
@@ -197,9 +263,16 @@ int trace_openat_exit(struct trace_event_raw_sys_exit *ctx)
     };
 
     // Store in tracking map
-    bpf_map_update_elem(&open_fds_map, &key, &info, BPF_ANY);
+    int map_ret = bpf_map_update_elem(&open_fds_map, &key, &info, BPF_ANY);
+    if (map_ret != 0) {
+        bpf_printk("[recovery] map update failed, ret=%d\n", map_ret);
+        return 0;
+    }
 
-    // Optional: Send tracking event for monitoring
+    bpf_printk("[recovery] TRACKED: inode=%llu dev=%u pid=%d fd=%d size=%llu\n",
+               inode_num, dev, pid, fd, size);
+
+    // Send tracking event with path for shadow FD opening
     struct fd_track_event_t track_event = {
         .pid = pid,
         .fd = fd,
@@ -209,6 +282,14 @@ int trace_openat_exit(struct trace_event_raw_sys_exit *ctx)
         .event_type = 0,  // 0 = open
     };
     bpf_get_current_comm(&track_event.comm, sizeof(track_event.comm));
+
+    // Retrieve pathname from temp map
+    struct openat_args_t *args = bpf_map_lookup_elem(&openat_args_map, &pid_tgid);
+    if (args) {
+        __builtin_memcpy(&track_event.filename, args->pathname, sizeof(track_event.filename));
+        bpf_map_delete_elem(&openat_args_map, &pid_tgid);  // Clean up temp entry
+        bpf_printk("[recovery] Path: %s\n", track_event.filename);
+    }
 
     bpf_perf_event_output(ctx, &tracking_events, BPF_F_CURRENT_CPU,
                           &track_event, sizeof(track_event));
@@ -233,28 +314,31 @@ int trace_close_entry(struct trace_event_raw_sys_enter *ctx)
         return 0;
     }
 
-    // Get files structure
-    struct files_struct *files = BPF_CORE_READ(task, files);
-    if (!files) {
+    // Read files structure
+    struct files_struct *files;
+    int ret = bpf_probe_read_kernel(&files, sizeof(files), &task->files);
+    if (ret != 0 || !files) {
         return 0;
     }
 
-    // Get fdtable
-    struct fdtable *fdt = BPF_CORE_READ(files, fdt);
-    if (!fdt) {
+    // Read fdtable
+    struct fdtable *fdt;
+    ret = bpf_probe_read_kernel(&fdt, sizeof(fdt), &files->fdt);
+    if (ret != 0 || !fdt) {
         return 0;
     }
 
-    // Get fd array
-    struct file **fd_array = BPF_CORE_READ(fdt, fd);
-    if (!fd_array) {
+    // Read fd array
+    struct file **fd_array;
+    ret = bpf_probe_read_kernel(&fd_array, sizeof(fd_array), &fdt->fd);
+    if (ret != 0 || !fd_array) {
         return 0;
     }
 
-    // Get file structure for this fd
+    // Read file structure
     struct file *file;
-    bpf_probe_read_kernel(&file, sizeof(file), &fd_array[fd]);
-    if (!file) {
+    ret = bpf_probe_read_kernel(&file, sizeof(file), &fd_array[fd]);
+    if (ret != 0 || !file) {
         return 0;
     }
 
@@ -270,6 +354,7 @@ int trace_close_entry(struct trace_event_raw_sys_enter *ctx)
     struct fd_key_t key = {
         .inode = inode_num,
         .dev = dev,
+        .padding = 0,
     };
 
     // Check if we're tracking this file
@@ -277,6 +362,9 @@ int trace_close_entry(struct trace_event_raw_sys_enter *ctx)
     if (info && info->pid == pid && info->fd == fd) {
         // Remove from tracking map
         bpf_map_delete_elem(&open_fds_map, &key);
+
+        bpf_printk("[recovery] UNTRACKED: inode=%llu dev=%u pid=%d fd=%d\n",
+                   inode_num, dev, pid, fd);
 
         // Optional: Send tracking event
         struct fd_track_event_t track_event = {
@@ -297,49 +385,9 @@ int trace_close_entry(struct trace_event_raw_sys_enter *ctx)
 }
 
 // Hook: Detect file deletion and check for open fds
-SEC("tracepoint/syscalls/sys_enter_unlinkat")
-int trace_unlinkat_entry(struct trace_event_raw_sys_enter *ctx)
-{
-    if (!is_tracking_enabled()) {
-        return 0;
-    }
-
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    u32 pid = pid_tgid >> 32;
-
-    // Get pathname from syscall arguments
-    // args[0] = dfd (directory fd)
-    // args[1] = pathname (char __user *)
-    // args[2] = flags
-    char *pathname_ptr = (char *)ctx->args[1];
-    if (!pathname_ptr) {
-        return 0;
-    }
-
-    struct recovery_event_t event = {0};
-    event.pid = pid;
-    bpf_get_current_comm(&event.comm, sizeof(event.comm));
-
-    // Read pathname from userspace
-    bpf_probe_read_user_str(&event.filename, sizeof(event.filename), pathname_ptr);
-
-    // TODO: We need to resolve pathname to inode
-    // This is complex in eBPF - we'd need to walk the dentry cache
-    // For now, we'll rely on userspace to do inode resolution
-    // and check the open_fds_map from userspace
-
-    // Alternative approach: Hook at a lower level where we have inode
-    // For production, we should use kprobe on vfs_unlink or do_unlinkat
-
-    // Send event to userspace for processing
-    bpf_perf_event_output(ctx, &recovery_events, BPF_F_CURRENT_CPU,
-                          &event, sizeof(event));
-
-    return 0;
-}
-
-// Hook: More reliable deletion detection via vfs_unlink kprobe
-// This gives us direct access to inode information
+// NOTE: vfs_unlink signature changed in kernel 6.3+
+// Old: int vfs_unlink(struct inode *dir, struct dentry *dentry, struct inode **delegated_inode)
+// New: int vfs_unlink(struct mnt_idmap *idmap, struct inode *dir, struct dentry *dentry, struct inode **delegated_inode)
 SEC("kprobe/vfs_unlink")
 int kprobe_vfs_unlink(struct pt_regs *ctx)
 {
@@ -347,36 +395,79 @@ int kprobe_vfs_unlink(struct pt_regs *ctx)
         return 0;
     }
 
-    // vfs_unlink signature: int vfs_unlink(struct inode *dir, struct dentry *dentry, struct inode **delegated_inode)
-    // Get dentry from second argument
-    struct dentry *dentry = (struct dentry *)PT_REGS_PARM2(ctx);
+    bpf_printk("[recovery] vfs_unlink TRIGGERED\n");
+
+    // Try to get dentry from different parameter positions
+    // For kernel 6.3+: parameter 3 (after mnt_idmap and dir)
+    // For older kernels: parameter 2 (after dir)
+    struct dentry *dentry = (struct dentry *)PT_REGS_PARM3(ctx);
     if (!dentry) {
+        dentry = (struct dentry *)PT_REGS_PARM2(ctx);
+    }
+
+    if (!dentry) {
+        bpf_printk("[recovery] vfs_unlink: dentry is NULL\n");
         return 0;
     }
 
-    // Get inode from dentry
-    struct inode *inode = BPF_CORE_READ(dentry, d_inode);
-    if (!inode) {
+    // Read inode pointer from dentry
+    struct inode *inode;
+    int ret = bpf_probe_read_kernel(&inode, sizeof(inode), &dentry->d_inode);
+    if (ret != 0 || !inode) {
+        bpf_printk("[recovery] vfs_unlink: failed to read d_inode, ret=%d\n", ret);
         return 0;
     }
 
-    u64 inode_num = BPF_CORE_READ(inode, i_ino);
-    u64 file_size = BPF_CORE_READ(inode, i_size);
-
-    struct super_block *sb = BPF_CORE_READ(inode, i_sb);
-    if (!sb) {
+    // Read inode number
+    u64 inode_num;
+    ret = bpf_probe_read_kernel(&inode_num, sizeof(inode_num), &inode->i_ino);
+    if (ret != 0) {
+        bpf_printk("[recovery] vfs_unlink: failed to read i_ino, ret=%d\n", ret);
         return 0;
     }
-    u32 dev = BPF_CORE_READ(sb, s_dev);
+
+    // Read file size
+    loff_t file_size;
+    ret = bpf_probe_read_kernel(&file_size, sizeof(file_size), &inode->i_size);
+    if (ret != 0) {
+        bpf_printk("[recovery] vfs_unlink: failed to read i_size, ret=%d\n", ret);
+        return 0;
+    }
+
+    // Read superblock pointer
+    struct super_block *sb;
+    ret = bpf_probe_read_kernel(&sb, sizeof(sb), &inode->i_sb);
+    if (ret != 0 || !sb) {
+        bpf_printk("[recovery] vfs_unlink: failed to read i_sb, ret=%d\n", ret);
+        return 0;
+    }
+
+    // Read device ID
+    u32 dev;
+    ret = bpf_probe_read_kernel(&dev, sizeof(dev), &sb->s_dev);
+    if (ret != 0) {
+        bpf_printk("[recovery] vfs_unlink: failed to read s_dev, ret=%d\n", ret);
+        return 0;
+    }
+
+    bpf_printk("[recovery] vfs_unlink: inode=%llu dev=%u size=%lld\n",
+               inode_num, dev, (u64)file_size);
 
     // Check if we have this file open in our tracking map
     struct fd_key_t key = {
         .inode = inode_num,
         .dev = dev,
+        .padding = 0,
     };
+
+    bpf_printk("[recovery] vfs_unlink: looking up inode=%llu dev=%u in map\n",
+               inode_num, dev);
 
     struct fd_info_t *info = bpf_map_lookup_elem(&open_fds_map, &key);
     if (info) {
+        bpf_printk("[recovery] vfs_unlink: FOUND in map! pid=%d fd=%d - RECOVERING\n",
+                   info->pid, info->fd);
+
         // File is being deleted and we have it tracked!
         // Send recovery event to userspace
         struct recovery_event_t event = {0};
@@ -385,17 +476,52 @@ int kprobe_vfs_unlink(struct pt_regs *ctx)
         event.fd_number = info->fd;
         event.inode = inode_num;
         event.dev = dev;
-        event.file_size = file_size;
+        event.file_size = (u64)file_size;
 
         bpf_get_current_comm(&event.comm, sizeof(event.comm));
 
         // Try to get filename from dentry
-        struct qstr d_name = BPF_CORE_READ(dentry, d_name);
-        bpf_probe_read_kernel_str(&event.filename, sizeof(event.filename), d_name.name);
+        struct qstr d_name;
+        ret = bpf_probe_read_kernel(&d_name, sizeof(d_name), &dentry->d_name);
+        if (ret == 0 && d_name.name) {
+            bpf_probe_read_kernel_str(&event.filename, sizeof(event.filename), d_name.name);
+        }
 
+        bpf_printk("[recovery] vfs_unlink: sending recovery event for '%s'\n", event.filename);
         bpf_perf_event_output(ctx, &recovery_events, BPF_F_CURRENT_CPU,
                               &event, sizeof(event));
+    } else {
+        bpf_printk("[recovery] vfs_unlink: NOT in map (file not tracked or already closed)\n");
     }
+
+    return 0;
+}
+
+// Fallback: Hook unlinkat syscall (less reliable but more portable)
+SEC("tracepoint/syscalls/sys_enter_unlinkat")
+int trace_unlinkat_entry(struct trace_event_raw_sys_enter *ctx)
+{
+    if (!is_tracking_enabled()) {
+        return 0;
+    }
+
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    char *pathname_ptr = (char *)ctx->args[1];
+
+    if (!pathname_ptr) {
+        return 0;
+    }
+
+    struct recovery_event_t event = {0};
+    event.pid = pid;
+    bpf_get_current_comm(&event.comm, sizeof(event.comm));
+    bpf_probe_read_user_str(&event.filename, sizeof(event.filename), pathname_ptr);
+
+    bpf_printk("[recovery] unlinkat: file='%s' by pid=%d (using syscall fallback)\n",
+               event.filename, pid);
+
+    // NOTE: We don't have inode info here, so this is just informational
+    // The kprobe/vfs_unlink should handle the actual recovery
 
     return 0;
 }

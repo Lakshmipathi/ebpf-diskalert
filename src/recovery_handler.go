@@ -21,6 +21,58 @@ type FdInfo struct {
 	Dev      uint32
 }
 
+// recoverFileFromFdDirect recovers a file using a direct file descriptor (shadow FD)
+func recoverFileFromFdDirect(fd int, originalPath string, inode uint64,
+                             size uint64, config *RecoveryConfig) error {
+	// Generate recovery filename
+	timestamp := time.Now().Unix()
+	basename := filepath.Base(originalPath)
+	if basename == "" || basename == "." {
+		basename = fmt.Sprintf("unnamed_%d", inode)
+	}
+
+	recoveryFilename := fmt.Sprintf("%d_%s_inode%d", timestamp, basename, inode)
+	recoveryPath := filepath.Join(config.RecoveryDir, recoveryFilename)
+
+	// Open source file via the direct FD using /proc/self/fd
+	procSelfFdPath := fmt.Sprintf("/proc/self/fd/%d", fd)
+	srcFile, err := os.Open(procSelfFdPath)
+	if err != nil {
+		return fmt.Errorf("failed to open shadow fd: %w", err)
+	}
+	defer srcFile.Close()
+
+	// Create destination file
+	dstFile, err := os.Create(recoveryPath)
+	if err != nil {
+		return fmt.Errorf("failed to create recovery file: %w", err)
+	}
+	defer dstFile.Close()
+
+	// Copy file contents
+	bytesWritten, err := io.Copy(dstFile, srcFile)
+	if err != nil {
+		// Clean up partial file
+		os.Remove(recoveryPath)
+		return fmt.Errorf("failed to copy file: %w", err)
+	}
+
+	// Sync to disk
+	if err := dstFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file: %w", err)
+	}
+
+	config.Logger.Printf("    Recovered %d bytes to: %s", bytesWritten, recoveryPath)
+
+	// Create metadata file with recovery information
+	if err := writeRecoveryMetadata(recoveryPath, originalPath, 0, uint32(fd),
+	                                 inode, bytesWritten); err != nil {
+		config.Logger.Printf("    Warning: failed to write metadata: %v", err)
+	}
+
+	return nil
+}
+
 // recoverFileFromFd recovers a deleted file using an open file descriptor
 func recoverFileFromFd(pid, fd uint32, inode uint64, originalPath string,
                        size uint64, config *RecoveryConfig) error {

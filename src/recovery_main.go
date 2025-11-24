@@ -22,11 +22,15 @@ func startRecoverySystem(cf *ConfigData) {
 
 	// Create recovery configuration
 	recoveryConfig := &RecoveryConfig{
-		Enabled:       cf.RecoveryEnabled,
-		MinFileSize:   cf.RecoveryMinSize,
-		RecoveryDir:   cf.RecoveryDir,
-		MaxRecoveries: cf.RecoveryMaxFiles,
-		Logger:        logger,
+		Enabled:          cf.RecoveryEnabled,
+		MinFileSize:      cf.RecoveryMinSize,
+		RecoveryDir:      cf.RecoveryDir,
+		MaxRecoveries:    cf.RecoveryMaxFiles,
+		Logger:           logger,
+		ShadowFDEnabled:  cf.ShadowFDEnabled,
+		MaxShadowFDs:     int(cf.MaxShadowFDs),
+		MaxShadowSize:    cf.MaxShadowSize,
+		ShadowFDTimeout:  time.Duration(cf.ShadowFDTimeoutSecs) * time.Second,
 	}
 
 	// Ensure recovery directory exists
@@ -39,6 +43,12 @@ func startRecoverySystem(cf *ConfigData) {
 	logger.Printf("  Min File Size: %d bytes", recoveryConfig.MinFileSize)
 	logger.Printf("  Recovery Directory: %s", recoveryConfig.RecoveryDir)
 	logger.Printf("  Max Recoveries: %d", recoveryConfig.MaxRecoveries)
+	logger.Printf("  Shadow FD Enabled: %v", recoveryConfig.ShadowFDEnabled)
+	if recoveryConfig.ShadowFDEnabled {
+		logger.Printf("  Max Shadow FDs: %d", recoveryConfig.MaxShadowFDs)
+		logger.Printf("  Max Shadow Size: %d bytes", recoveryConfig.MaxShadowSize)
+		logger.Printf("  Shadow FD Timeout: %v", recoveryConfig.ShadowFDTimeout)
+	}
 
 	// Start cleanup daemon in background
 	go RecoveryManagerDaemon(recoveryConfig, 1*time.Hour)

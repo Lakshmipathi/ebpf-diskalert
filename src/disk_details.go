@@ -85,10 +85,15 @@ type ConfigData struct {
 	Action             string
 	RepeatAction       uint64
 	// File recovery configuration
-	RecoveryEnabled    bool
-	RecoveryMinSize    uint64
-	RecoveryDir        string
-	RecoveryMaxFiles   uint64
+	RecoveryEnabled       bool
+	RecoveryMinSize       uint64
+	RecoveryDir           string
+	RecoveryMaxFiles      uint64
+	// Shadow FD configuration
+	ShadowFDEnabled       bool
+	MaxShadowFDs          uint64
+	MaxShadowSize         uint64
+	ShadowFDTimeoutSecs   uint64
 }
 
 type Devinfo struct {
@@ -122,6 +127,24 @@ func getConfig(configFile string) ConfigData {
 	cf.RecoveryMaxFiles = viper.GetUint64("recovery_max_files")
 	if cf.RecoveryMaxFiles == 0 {
 		cf.RecoveryMaxFiles = 1000
+	}
+
+	// Read shadow FD configuration (default: enabled)
+	cf.ShadowFDEnabled = viper.GetBool("shadow_fd_enabled")
+	if !viper.IsSet("shadow_fd_enabled") {
+		cf.ShadowFDEnabled = true // Default to enabled
+	}
+	cf.MaxShadowFDs = viper.GetUint64("max_shadow_fds")
+	if cf.MaxShadowFDs == 0 {
+		cf.MaxShadowFDs = 1000 // Default 1000 shadow FDs
+	}
+	cf.MaxShadowSize = viper.GetUint64("max_shadow_size")
+	if cf.MaxShadowSize == 0 {
+		cf.MaxShadowSize = 100 * 1024 * 1024 // Default 100MB
+	}
+	cf.ShadowFDTimeoutSecs = viper.GetUint64("shadow_fd_timeout_secs")
+	if cf.ShadowFDTimeoutSecs == 0 {
+		cf.ShadowFDTimeoutSecs = 300 // Default 5 minutes
 	}
 
 	return cf

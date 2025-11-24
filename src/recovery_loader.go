@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -27,8 +28,10 @@ type RecoveryEvent struct {
 	Pid        uint32
 	PidWithFd  uint32
 	FdNumber   uint32
+	_          [4]byte // Padding for alignment before Inode
 	Inode      uint64
 	Dev        uint32
+	_          [4]byte // Padding for alignment before FileSize
 	FileSize   uint64
 	Filename   [256]byte
 	Comm       [16]byte
@@ -40,19 +43,36 @@ type FdTrackEvent struct {
 	Fd        uint32
 	Inode     uint64
 	Dev       uint32
+	_         [4]byte // Padding for alignment before Size
 	Size      uint64
 	EventType uint8
+	_         [3]byte // Padding after EventType
 	Filename  [256]byte
 	Comm      [16]byte
 }
 
+// ShadowFD holds information about a shadow file descriptor we're keeping open
+type ShadowFD struct {
+	Fd        int
+	Path      string
+	Inode     uint64
+	Dev       uint32
+	Size      uint64
+	OpenedAt  time.Time
+}
+
 // RecoveryConfig holds configuration for file recovery
 type RecoveryConfig struct {
-	Enabled       bool
-	MinFileSize   uint64
-	RecoveryDir   string
-	MaxRecoveries uint64
-	Logger        *log.Logger
+	Enabled          bool
+	MinFileSize      uint64
+	RecoveryDir      string
+	MaxRecoveries    uint64
+	Logger           *log.Logger
+	// Shadow FD configuration
+	ShadowFDEnabled  bool
+	MaxShadowFDs     int
+	MaxShadowSize    uint64
+	ShadowFDTimeout  time.Duration
 }
 
 // RecoveryStats holds statistics
@@ -99,6 +119,12 @@ func (rs *RecoveryStats) GetStats() (uint64, uint64, uint64, uint64, uint64) {
 
 // Global recovery stats
 var recoveryStats RecoveryStats
+
+// Global shadow FD tracking
+var (
+	shadowFDs   = make(map[string]*ShadowFD) // key: "inode:dev"
+	shadowFDsMu sync.RWMutex
+)
 
 // setRecoveryRlimit sets the memory limit for eBPF operations
 func setRecoveryRlimit() error {
@@ -153,13 +179,22 @@ func RecoveryLoader(config *RecoveryConfig) error {
 	config.Logger.Printf("Recovery config: enabled=%v, min_file_size=%d bytes",
 		config.Enabled, config.MinFileSize)
 
-	// Attach tracepoints for openat
-	tpOpenat, err := link.Tracepoint("syscalls", "sys_exit_openat",
-	                                  objs.TraceOpenatExit, nil)
+	// Attach tracepoint for openat entry (to capture pathname)
+	tpOpenatEnter, err := link.Tracepoint("syscalls", "sys_enter_openat",
+	                                       objs.TraceOpenatEnter, nil)
 	if err != nil {
-		return fmt.Errorf("failed to attach openat tracepoint: %w", err)
+		return fmt.Errorf("failed to attach sys_enter_openat tracepoint: %w", err)
 	}
-	defer tpOpenat.Close()
+	defer tpOpenatEnter.Close()
+	config.Logger.Printf("Attached to sys_enter_openat tracepoint")
+
+	// Attach tracepoint for openat exit (to track fd)
+	tpOpenatExit, err := link.Tracepoint("syscalls", "sys_exit_openat",
+	                                      objs.TraceOpenatExit, nil)
+	if err != nil {
+		return fmt.Errorf("failed to attach sys_exit_openat tracepoint: %w", err)
+	}
+	defer tpOpenatExit.Close()
 	config.Logger.Printf("Attached to sys_exit_openat tracepoint")
 
 	// Attach tracepoints for close
@@ -234,8 +269,142 @@ func RecoveryLoader(config *RecoveryConfig) error {
 		}
 	}()
 
+	// Cleanup old shadow FDs periodically
+	if config.ShadowFDEnabled && config.ShadowFDTimeout > 0 {
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				cleanupTimedOutShadowFDs(config)
+			}
+		}()
+	}
+
 	wg.Wait()
 	return nil
+}
+
+// handleShadowFDOpen opens a shadow FD for the file
+func handleShadowFDOpen(event *FdTrackEvent, config *RecoveryConfig) {
+	// Apply filters
+	if event.Size < config.MinFileSize {
+		return
+	}
+	if config.MaxShadowSize > 0 && event.Size > config.MaxShadowSize {
+		return // File too large for shadow FD
+	}
+
+	// Get pathname
+	path := nullTerminatedString(event.Filename[:])
+	if path == "" {
+		config.Logger.Printf("[SHADOW] DEBUG: path empty for inode=%d, size=%d", event.Inode, event.Size)
+		return // No path available
+	}
+
+	// Handle relative paths by resolving via /proc/pid/cwd
+	fullPath := path
+	if path[0] != '/' {
+		// Relative path - resolve by reading process's cwd and joining with filename
+		cwdLinkPath := fmt.Sprintf("/proc/%d/cwd", event.Pid)
+		if cwd, err := os.Readlink(cwdLinkPath); err == nil {
+			fullPath = filepath.Join(cwd, path)
+			config.Logger.Printf("[SHADOW] DEBUG: Resolved relative path %s (cwd=%s) -> %s", path, cwd, fullPath)
+		} else {
+			config.Logger.Printf("[SHADOW] DEBUG: Failed to read cwd for pid %d: %v", event.Pid, err)
+			return // Can't resolve path
+		}
+	} else {
+		config.Logger.Printf("[SHADOW] DEBUG: Attempting to shadow: %s (inode=%d, size=%d)", path, event.Inode, event.Size)
+	}
+
+	// Check if we're at the limit
+	shadowFDsMu.Lock()
+	if len(shadowFDs) >= config.MaxShadowFDs {
+		// At limit - remove oldest shadow FD
+		cleanupOldestShadowFD()
+	}
+
+	// Create key
+	key := fmt.Sprintf("%d:%d", event.Inode, event.Dev)
+
+	// Check if we already have this file
+	if _, exists := shadowFDs[key]; exists {
+		shadowFDsMu.Unlock()
+		return // Already tracking
+	}
+	shadowFDsMu.Unlock()
+
+	// Try to open the file using the resolved path
+	fd, err := unix.Open(fullPath, unix.O_RDONLY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		// File might already be deleted or we don't have permission
+		config.Logger.Printf("[SHADOW] DEBUG: Failed to open %s: %v", fullPath, err)
+		return
+	}
+
+	// Store shadow FD
+	shadow := &ShadowFD{
+		Fd:       fd,
+		Path:     fullPath,
+		Inode:    event.Inode,
+		Dev:      event.Dev,
+		Size:     event.Size,
+		OpenedAt: time.Now(),
+	}
+
+	shadowFDsMu.Lock()
+	shadowFDs[key] = shadow
+	shadowFDsMu.Unlock()
+
+	config.Logger.Printf("[SHADOW] Opened: %s (inode=%d, fd=%d, size=%d bytes)",
+		path, event.Inode, fd, event.Size)
+}
+
+// cleanupOldestShadowFD removes the oldest shadow FD (must be called with lock held)
+func cleanupOldestShadowFD() {
+	var oldestKey string
+	var oldestTime time.Time
+
+	for key, shadow := range shadowFDs {
+		if oldestKey == "" || shadow.OpenedAt.Before(oldestTime) {
+			oldestKey = key
+			oldestTime = shadow.OpenedAt
+		}
+	}
+
+	if oldestKey != "" {
+		if shadow, exists := shadowFDs[oldestKey]; exists {
+			unix.Close(shadow.Fd)
+			delete(shadowFDs, oldestKey)
+		}
+	}
+}
+
+// cleanupTimedOutShadowFDs removes shadow FDs that have exceeded the timeout
+func cleanupTimedOutShadowFDs(config *RecoveryConfig) {
+	now := time.Now()
+	var toRemove []string
+
+	shadowFDsMu.RLock()
+	for key, shadow := range shadowFDs {
+		if now.Sub(shadow.OpenedAt) > config.ShadowFDTimeout {
+			toRemove = append(toRemove, key)
+		}
+	}
+	shadowFDsMu.RUnlock()
+
+	if len(toRemove) > 0 {
+		shadowFDsMu.Lock()
+		for _, key := range toRemove {
+			if shadow, exists := shadowFDs[key]; exists {
+				unix.Close(shadow.Fd)
+				delete(shadowFDs, key)
+				config.Logger.Printf("[SHADOW] Timeout closed: %s (held for %v)",
+					shadow.Path, now.Sub(shadow.OpenedAt))
+			}
+		}
+		shadowFDsMu.Unlock()
+	}
 }
 
 // handleTrackingEvents processes file open/close tracking events
@@ -262,19 +431,29 @@ func handleTrackingEvents(reader *perf.Reader, config *RecoveryConfig) {
 			continue
 		}
 
-		// Process tracking event (optional logging)
-		eventType := "OPEN"
-		if event.EventType == 1 {
-			eventType = "CLOSE"
-		} else {
+		// Process tracking event
+		if event.EventType == 0 {
+			// File OPEN event
 			recoveryStats.IncrementTracked()
-		}
 
-		// Only log if size is significant (reduce noise)
-		if event.Size > config.MinFileSize {
-			config.Logger.Printf("[TRACK] %s: pid=%d fd=%d inode=%d size=%d comm=%s",
-				eventType, event.Pid, event.Fd, event.Inode, event.Size,
-				nullTerminatedString(event.Comm[:]))
+			// Try to open shadow FD if enabled
+			if config.ShadowFDEnabled {
+				handleShadowFDOpen(&event, config)
+			}
+
+			// Only log if size is significant (reduce noise)
+			if event.Size > config.MinFileSize {
+				config.Logger.Printf("[TRACK] OPEN: pid=%d fd=%d inode=%d size=%d comm=%s",
+					event.Pid, event.Fd, event.Inode, event.Size,
+					nullTerminatedString(event.Comm[:]))
+			}
+		} else {
+			// File CLOSE event - could remove shadow FD here if desired
+			if event.Size > config.MinFileSize {
+				config.Logger.Printf("[TRACK] CLOSE: pid=%d fd=%d inode=%d size=%d comm=%s",
+					event.Pid, event.Fd, event.Inode, event.Size,
+					nullTerminatedString(event.Comm[:]))
+			}
 		}
 	}
 }
@@ -312,8 +491,33 @@ func handleRecoveryEvents(reader *perf.Reader, config *RecoveryConfig) {
 		config.Logger.Printf("[DELETION DETECTED] file=%s inode=%d size=%d deleted_by=%s (pid=%d)",
 			filename, event.Inode, event.FileSize, comm, event.Pid)
 
-		// If we have an open fd, attempt recovery
-		if event.PidWithFd > 0 && event.FdNumber > 0 {
+		// First, check if we have a shadow FD for this file
+		key := fmt.Sprintf("%d:%d", event.Inode, event.Dev)
+		shadowFDsMu.RLock()
+		shadow, hasShadow := shadowFDs[key]
+		shadowFDsMu.RUnlock()
+
+		if hasShadow {
+			// We have a shadow FD! Use it for recovery
+			config.Logger.Printf("  → Using shadow FD: fd=%d - attempting recovery", shadow.Fd)
+
+			if err := recoverFileFromFdDirect(shadow.Fd, shadow.Path,
+			                                   event.Inode, event.FileSize,
+			                                   config); err != nil {
+				config.Logger.Printf("  ✗ Recovery from shadow FD failed: %v", err)
+				recoveryStats.IncrementFailed()
+			} else {
+				config.Logger.Printf("  ✓ Recovery successful (via shadow FD)")
+				recoveryStats.IncrementRecovered(event.FileSize)
+			}
+
+			// Close and remove the shadow FD after recovery attempt
+			shadowFDsMu.Lock()
+			unix.Close(shadow.Fd)
+			delete(shadowFDs, key)
+			shadowFDsMu.Unlock()
+		} else if event.PidWithFd > 0 && event.FdNumber > 0 {
+			// Fallback: check if another process has it open
 			config.Logger.Printf("  → File is open: pid=%d fd=%d - attempting recovery",
 				event.PidWithFd, event.FdNumber)
 
