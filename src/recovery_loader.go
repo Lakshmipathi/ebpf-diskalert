@@ -1,10 +1,11 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang recovery ./bpf/recovery.bpf.c -- -I/usr/include/bpf -I.
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target amd64 -cc clang recovery ./bpf/recovery.bpf.c -- -I/usr/include/bpf -I.
 
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -242,7 +243,7 @@ func handleTrackingEvents(reader *perf.Reader, config *RecoveryConfig) {
 	for {
 		record, err := reader.Read()
 		if err != nil {
-			if perf.IsClosed(err) {
+			if errors.Is(err, perf.ErrClosed) {
 				return
 			}
 			config.Logger.Printf("Error reading tracking event: %v", err)
@@ -283,7 +284,7 @@ func handleRecoveryEvents(reader *perf.Reader, config *RecoveryConfig) {
 	for {
 		record, err := reader.Read()
 		if err != nil {
-			if perf.IsClosed(err) {
+			if errors.Is(err, perf.ErrClosed) {
 				return
 			}
 			config.Logger.Printf("Error reading recovery event: %v", err)

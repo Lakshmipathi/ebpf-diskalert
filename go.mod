@@ -1,12 +1,14 @@
 module main
 
-go 1.21
+go 1.24.0
+
+toolchain go1.24.10
 
 require (
-	github.com/cilium/ebpf v0.11.0
+	github.com/cilium/ebpf v0.20.0
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/viper v1.17.0
-	golang.org/x/sys v0.13.0
+	golang.org/x/sys v0.37.0
 )
 
 require (

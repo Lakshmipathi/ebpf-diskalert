@@ -1,6 +1,6 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang diskalert ./bpf/diskalert.bpf.c -- -I/usr/include/bpf -I.
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target amd64 -cc clang diskalert ./bpf/diskalert.bpf.c -- -I/usr/include/bpf -I.
 
 import (
 	"bytes"

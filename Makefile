@@ -22,7 +22,7 @@ run-recovery: build
 	sudo ./$(APP) -c config/config-with-recovery.toml
 
 # Generate eBPF bindings for both diskalert and recovery
-gen: sum vmlinux src/diskalert_bpfel.go src/recovery_bpfel.go
+gen: sum vmlinux src/diskalert_x86_bpfel.go src/recovery_x86_bpfel.go
 
 # Generate vmlinux.h from kernel BTF
 vmlinux: src/bpf/vmlinux.h
@@ -36,13 +36,12 @@ fmt: sum
 
 # Clean build artifacts
 clean:
-	-rm $(APP)
-	-rm src/*_bpfel.go src/*_bpfel.o
-	-rm src/gen*
-	-rm src/bpf/vmlinux.h
-	-rm go.sum
-	sed 's/v.*/latest/g' -i go.mod
-	@echo "✓ Cleaned"
+	-rm -f $(APP)
+	-rm -f src/*_bpfel.go src/*_bpfel.o src/*_x86_bpfel.go src/*_x86_bpfel.o
+	-rm -f src/gen*
+	-rm -f src/bpf/vmlinux.h
+	-rm -f go.sum
+	@echo "✓ Cleaned (run 'git checkout go.mod' if it was modified)"
 
 # Test recovery feature (requires root)
 test-recovery:
@@ -93,7 +92,7 @@ help:
 	@echo "  make help            - Show this help"
 
 # Build application
-$(APP): src/main.go src/diskalert_bpfel.go src/recovery_bpfel.go
+$(APP): src/main.go src/diskalert_x86_bpfel.go src/recovery_x86_bpfel.go
 	CGO_ENABLED=0 go build -o $(APP) src/*.go
 
 # Generate vmlinux.h from kernel BTF
@@ -101,11 +100,11 @@ src/bpf/vmlinux.h:
 	bpftool btf dump file /sys/kernel/btf/vmlinux format c > src/bpf/vmlinux.h
 
 # Generate diskalert eBPF bindings
-src/diskalert_bpfel.go: src/bpf/diskalert.bpf.c
+src/diskalert_x86_bpfel.go: src/bpf/diskalert.bpf.c
 	cd src && go generate -x ./...
 
 # Generate recovery eBPF bindings
-src/recovery_bpfel.go: src/bpf/recovery.bpf.c
+src/recovery_x86_bpfel.go: src/bpf/recovery.bpf.c
 	cd src && go generate -x ./...
 
 # Download Go dependencies
