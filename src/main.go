@@ -18,7 +18,7 @@ func main() {
 		Use:     "ebpf-diskalert",
 		Short:   "monitor disk usage and take action",
 		Long:    "ebpf-diskalert is a tool to monitor disk usage and perform actions.\n\n(C) 2023: Lakshmipathi Ganapathi <lakshmipathi.g@gmail.com>",
-		Version: "0.1",
+		Version: "0.2",
 		Run: func(cmd *cobra.Command, args []string) {
 			if versionFlag {
 				fmt.Println("Version 1.0")

@@ -84,6 +84,8 @@ type ConfigData struct {
 	DiskUsageThreshold uint64
 	Action             string
 	RepeatAction       uint64
+	SlackWebhook       string
+	Webhook            string
 }
 
 type Devinfo struct {
@@ -106,6 +108,8 @@ func getConfig(configFile string) ConfigData {
 	cf.DiskUsageThreshold = viper.GetUint64("diskusage_threshold")
 	cf.Action = viper.GetString("action")
 	cf.RepeatAction = viper.GetUint64("repeat_action")
+	cf.SlackWebhook = viper.GetString("slack_webhook")
+	cf.Webhook = viper.GetString("webhook")
 	return cf
 }
 

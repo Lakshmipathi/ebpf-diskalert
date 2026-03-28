@@ -3,3 +3,8 @@ diskusage_threshold = 90
 action = "/usr/bin/date"
 repeat_action = 1
 
+# Optional: Slack webhook for instant alerts
+# slack_webhook = "https://hooks.slack.com/services/T.../B.../xxx"
+
+# Optional: Generic webhook (sends JSON POST)
+# webhook = "https://your-server.com/api/alerts"

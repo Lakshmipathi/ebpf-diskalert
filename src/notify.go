@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Run action binary in background and log the results
@@ -53,6 +57,34 @@ func DiskUsage(path string, DiskUsageThreshold uint64) (disk DiskStatus) {
 	return
 }
 
+// Send alert to Slack via webhook
+func sendSlackAlert(webhookURL string, device string, usedPct float64) error {
+	hostname, _ := os.Hostname()
+	payload := fmt.Sprintf(`{"text":"🚨 *Disk Alert* on %s\nDevice: %s\nUsage: %.1f%% (threshold breached)\nTime: %s"}`,
+		hostname, device, usedPct, time.Now().Format("2006-01-02 15:04:05"))
+
+	resp, err := http.Post(webhookURL, "application/json", bytes.NewBufferString(payload))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
+// Send alert to a generic webhook (POST with JSON)
+func sendWebhookAlert(webhookURL string, device string, usedPct float64) error {
+	hostname, _ := os.Hostname()
+	payload := fmt.Sprintf(`{"hostname":"%s","device":"%s","usage_pct":%.1f,"threshold":%d,"timestamp":"%s"}`,
+		hostname, device, usedPct, cf.DiskUsageThreshold, time.Now().Format(time.RFC3339))
+
+	resp, err := http.Post(webhookURL, "application/json", bytes.NewBufferString(payload))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
 func checkDiskUSage(ci *ConfigData, di *Devinfo) {
 	var err error
 
@@ -60,15 +92,39 @@ func checkDiskUSage(ci *ConfigData, di *Devinfo) {
 	//fmt.Println("TotalBlocks:", disk.Blocks, "FreeBlocks:", disk.Bfree, "UsedBlocks:", disk.Bused, "Threshold:", disk.Threshold)
 
 	if disk.Bused > disk.Threshold {
+		usedPct := float64(disk.Bused) / float64(disk.Blocks) * 100.0
 		logger.Println("Threshold breached Perform action:", cf.Action)
 		if cf.RepeatAction > disknofity_counter {
-			err = runInBackground(cf.Action, APPLOG_PATH)
-			if err != nil {
-				logger.Printf("Error runInBackground: %v\n", err)
-				return
-			} else {
-				logger.Printf("Started background process: %s\n", cf.Action)
+			// Run action script (existing behavior)
+			if cf.Action != "" {
+				err = runInBackground(cf.Action, APPLOG_PATH)
+				if err != nil {
+					logger.Printf("Error runInBackground: %v\n", err)
+				} else {
+					logger.Printf("Started background process: %s\n", cf.Action)
+				}
 			}
+
+			// Send Slack notification
+			if cf.SlackWebhook != "" {
+				err = sendSlackAlert(cf.SlackWebhook, cf.DeviceName, usedPct)
+				if err != nil {
+					logger.Printf("Error sending Slack alert: %v\n", err)
+				} else {
+					logger.Println("Slack alert sent successfully")
+				}
+			}
+
+			// Send generic webhook notification
+			if cf.Webhook != "" {
+				err = sendWebhookAlert(cf.Webhook, cf.DeviceName, usedPct)
+				if err != nil {
+					logger.Printf("Error sending webhook alert: %v\n", err)
+				} else {
+					logger.Println("Webhook alert sent successfully")
+				}
+			}
+
 			disknofity_counter += 1
 		} else {
 			logger.Println("Already nofitication completed for ", cf.RepeatAction, "times. Stopped further nofitication.")
